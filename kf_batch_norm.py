@@ -106,15 +106,16 @@ class KungfuBatchNorm(ms.nn.Cell):
             variance = sum_global_var / global_batch_size
 
             # TRY
-            self._print_op("before try")
+            exp_val = self.moving_mean.copy()
+            var = self.moving_variance.copy()
             for i in range(self.num_features):
-                self.exp_val[i] = expected_value[i].mean()
-                self.var[i] = variance[i].mean()
+                exp_val[i] = expected_value[i].mean()
+                var[i] = variance[i].mean()
             x_norm = x.copy()
             for i in range(batch_size):
                 for j in range(self.num_features):
-                    zero_mean = (x[i, j] - self.exp_val[j])
-                    one_var = self._sqrt_op(self.var[j] + self.eps)
+                    zero_mean = (x[i, j] - exp_val[j])
+                    one_var = self._sqrt_op(var[j] + self.eps)
                     x_norm[i, j] = zero_mean / one_var
 
             for i in range(batch_size):
@@ -123,14 +124,16 @@ class KungfuBatchNorm(ms.nn.Cell):
 
             for i in range(self.num_features):
                 self.moving_mean[i] = (self.momentum * self.moving_mean[i]
-                                   + (1 - self.momentum) * expected_value[i].mean())
+                                   + (1 - self.momentum) * exp_val[i])
                 self.moving_variance[i] = (self.momentum * self.moving_variance[i]
-                                       + (1 - self.momentum) * variance[i].mean())
+                                       + (1 - self.momentum) * var[i])
 
         else: # inference
-            x_norm = (x - self.moving_mean) / self._sqrt_op(self.moving_variance + self.eps)
+            x_norm = x.copy()
             for i in range(batch_size):
                 for j in range(self.num_features):
+                    x_norm[i][j] = ((x[i][j] - self.moving_mean[j]) /
+                    self._sqrt_op(self.moving_variance[j] + self.eps))
                     x_norm[i][j] = self.beta[j] * x_norm[i][j] + self.gamma[j]
 
         return x_norm
@@ -185,13 +188,13 @@ def test_kungfu_single():
     kfops.init(device)
 
     # DEBUG
-    num_features = 1
+    num_features = 2
 
     #  num_features = 3
     global_bn_op = KungfuBatchNorm(num_features)
     global_bn_op.set_train()
 
-    x_np = (np.random.rand(2, 1, 2, 2) * 10).astype(np.float32)
+    x_np = (np.random.rand(2, 2, 2, 2) * 10).astype(np.float32)
 
     # DEBUG
     print("input shape")
