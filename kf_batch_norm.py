@@ -50,12 +50,6 @@ class KungfuBatchNorm(ms.nn.Cell):
         # DEBUG
         self._print_op = ms.ops.Print()
 
-        # TRY
-        x = np.zeros([3]).astype(np.float32)
-        self.exp_val = ms.Parameter(x, requires_grad=False)
-        x = np.zeros([3]).astype(np.float32)
-        self.var = ms.Parameter(x, requires_grad=False)
-
     def _construct(self, x):
         # Assume x of shape (N, C, H, W)
         batch_size = x.shape[0]
@@ -96,26 +90,38 @@ class KungfuBatchNorm(ms.nn.Cell):
         if self.training:
             sum_local_batch = x.sum(axis=0)
             sum_global_batch = self._all_reduce_op(sum_local_batch)
+
+            # DEBUG
+            self._print_op("sum local batch", sum_local_batch.shape)
+            self._print_op("sum global batch" , sum_global_batch.shape)
+
             cluster_size = self._cluster_size_op # FIXME: not a Mindspore op
             global_batch_size = batch_size * cluster_size
-            expected_value = sum_global_batch / global_batch_size
 
+            #  expected_value = sum_global_batch / global_batch_size
+
+            #  sum_local_squ = self._square_op(x - expected_value)
+            #  sum_local_var = sum_local_squ.sum(axis=0)
+            #  sum_global_var = self._all_reduce_op(sum_local_var)
+            #  variance = sum_global_var / global_batch_size
+
+            # TRY
+            expected_value = self.moving_mean.copy()
+            variance = self.moving_variance.copy()
+            mean_global_batch = sum_global_batch / global_batch_size
+            for i in range(self.num_features):
+                expected_value[i] = mean_global_batch[i].mean()
             sum_local_squ = self._square_op(x - expected_value)
             sum_local_var = sum_local_squ.sum(axis=0)
             sum_global_var = self._all_reduce_op(sum_local_var)
-            variance = sum_global_var / global_batch_size
-
-            # TRY
-            exp_val = self.moving_mean.copy()
-            var = self.moving_variance.copy()
+            mean_variance = sum_global_var / global_batch_size
             for i in range(self.num_features):
-                exp_val[i] = expected_value[i].mean()
-                var[i] = variance[i].mean()
+                variance[i] = mean_variance[i].mean()
             x_norm = x.copy()
             for i in range(batch_size):
                 for j in range(self.num_features):
-                    zero_mean = (x[i, j] - exp_val[j])
-                    one_var = self._sqrt_op(var[j] + self.eps)
+                    zero_mean = (x[i, j] - expected_value[j])
+                    one_var = self._sqrt_op(variance[j] + self.eps)
                     x_norm[i, j] = zero_mean / one_var
 
             for i in range(batch_size):
@@ -124,9 +130,9 @@ class KungfuBatchNorm(ms.nn.Cell):
 
             for i in range(self.num_features):
                 self.moving_mean[i] = (self.momentum * self.moving_mean[i]
-                                   + (1 - self.momentum) * exp_val[i])
+                                   + (1 - self.momentum) * expected_value[i])
                 self.moving_variance[i] = (self.momentum * self.moving_variance[i]
-                                       + (1 - self.momentum) * var[i])
+                                       + (1 - self.momentum) * variance[i])
 
         else: # inference
             x_norm = x.copy()
@@ -222,6 +228,28 @@ def test_kungfu_single():
     diff = kf_out.asnumpy() - ms_out.asnumpy()
     diff = np.abs(diff)
     print("max diff {}".format(diff.max()))
+
+    # COMPARE
+    if True:
+        kf_params = global_bn_op.get_parameters()
+        ms_params = ms_bn_op.get_parameters()
+        for ms_param, kf_param in zip(ms_params, kf_params):
+            a = ms_param.asnumpy()
+            b = kf_param.asnumpy()
+            if np.array_equal(a, b):
+                print("{} Equal".format(ms_param.name))
+            else:
+                print("{} Unequal".format(ms_param.name))
+                max_diff = np.max(np.abs(a - b)) 
+                print("max diff {}".format(max_diff))
+
+    if False:
+        for attr in dir(ms_bn_op):
+            if hasattr(ms_bn_op, attr) and hasattr(global_bn_op, attr):
+                if getattr(ms_bn_op, attr) != getattr(global_bn_op, attr):
+                    print("{} Unequal".format(attr))
+                else:
+                    print("{} Equal".format(attr))
 
     kfops.finalize(device)
 
