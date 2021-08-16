@@ -42,7 +42,7 @@ class KungfuBatchNorm(ms.nn.Cell):
         self.beta = ms.Parameter(initializer(
             beta_init, num_features), name="beta", requires_grad=affine)
 
-        self._cluster_size_op = kfops.kungfu_current_cluster_size() # FIXME: not a Mindspore op
+        self._cluster_size_op = kfops.KungFuClusterSize()
         self._all_reduce_op = kfops.KungFuAllReduce()
         self._square_op = ms.ops.Square()
         self._sqrt_op = ms.ops.Sqrt()
@@ -54,69 +54,33 @@ class KungfuBatchNorm(ms.nn.Cell):
         # Assume x of shape (N, C, H, W)
         batch_size = x.shape[0]
         if self.training:
-            sum_local_batch = x.sum(axis=0)
-            sum_global_batch = self._all_reduce_op(sum_local_batch)
-            cluster_size = self._cluster_size_op # FIXME: not a Mindspore op
-            global_batch_size = batch_size * cluster_size
-            expected_value = sum_global_batch / global_batch_size
-
-            sum_local_squ = self._square_op(x - expected_value)
-            sum_local_var = sum_local_squ.sum(axis=0)
-            sum_global_var = self._all_reduce_op(sum_local_var)
-            variance = sum_global_var / global_batch_size
-
-            x_norm = (x - expected_value) / self._sqrt_op(variance + self.eps)
-            for i in range(batch_size):
-                for j in range(self.num_features):
-                    x_norm[i][j] = self.gamma[j] * x_norm[i][j] + self.beta[j]
-
-            for i in range(self.num_features):
-                self.moving_mean[i] = (self.momentum * self.moving_mean[i]
-                                   + (1 - self.momentum) * expected_value[i].mean())
-                self.moving_variance[i] = (self.momentum * self.moving_variance[i]
-                                       + (1 - self.momentum) * variance[i].mean())
-
-        else: # inference
-            x_norm = (x - self.moving_mean) / self._sqrt_op(self.moving_variance + self.eps)
-            for i in range(batch_size):
-                for j in range(self.num_features):
-                    x_norm[i][j] = self.beta[j] * x_norm[i][j] + self.gamma[j]
-
-        return x_norm
-
-    def construct(self, x):
-        # Assume x of shape (N, C, H, W)
-        batch_size = x.shape[0]
-        if self.training:
-            sum_local_batch = x.sum(axis=0)
-            sum_global_batch = self._all_reduce_op(sum_local_batch)
-
-            # DEBUG
-            self._print_op("sum local batch", sum_local_batch.shape)
-            self._print_op("sum global batch" , sum_global_batch.shape)
-
-            cluster_size = self._cluster_size_op # FIXME: not a Mindspore op
+            # calculate global batch size
+            cluster_size = self._cluster_size_op()
             global_batch_size = batch_size * cluster_size
 
-            #  expected_value = sum_global_batch / global_batch_size
-
-            #  sum_local_squ = self._square_op(x - expected_value)
-            #  sum_local_var = sum_local_squ.sum(axis=0)
-            #  sum_global_var = self._all_reduce_op(sum_local_var)
-            #  variance = sum_global_var / global_batch_size
-
-            # TRY
-            expected_value = self.moving_mean.copy()
-            variance = self.moving_variance.copy()
+            # mean along N
+            sum_local_batch = x.sum(axis=0)
+            sum_global_batch = self._all_reduce_op(sum_local_batch)
             mean_global_batch = sum_global_batch / global_batch_size
+
+            # calculate expected value
+            expected_value = self.moving_mean.copy()
             for i in range(self.num_features):
                 expected_value[i] = mean_global_batch[i].mean()
-            sum_local_squ = self._square_op(x - expected_value)
-            sum_local_var = sum_local_squ.sum(axis=0)
+
+            # calculate variance
+            variance = self.moving_variance.copy()
+            local_squared = x.copy()
+            for i in range(batch_size):
+                for j in range(self.num_features):
+                    local_squared[i, j] = self._square_op(x[i, j] - expected_value[j])
+            sum_local_var = local_squared.sum(axis=0)
             sum_global_var = self._all_reduce_op(sum_local_var)
             mean_variance = sum_global_var / global_batch_size
-            for i in range(self.num_features):
-                variance[i] = mean_variance[i].mean()
+            for j in range(self.num_features):
+                variance[j] = mean_variance[j].mean()
+
+            # normalise input
             x_norm = x.copy()
             for i in range(batch_size):
                 for j in range(self.num_features):
@@ -128,19 +92,90 @@ class KungfuBatchNorm(ms.nn.Cell):
                 for j in range(self.num_features):
                     x_norm[i][j] = self.gamma[j] * x_norm[i][j] + self.beta[j]
 
-            for i in range(self.num_features):
-                self.moving_mean[i] = (self.momentum * self.moving_mean[i]
-                                   + (1 - self.momentum) * expected_value[i])
-                self.moving_variance[i] = (self.momentum * self.moving_variance[i]
-                                       + (1 - self.momentum) * variance[i])
+            for j in range(self.num_features):
+                # DEBUG
+                #  self._print_op("mean ", j, " ", expected_value[j])
+                #  self._print_op("variance ", j, " ", variance[j])
 
-        else: # inference
+                self.moving_mean[j] = ((1 - self.momentum) * self.moving_mean[j]
+                                   + self.momentum * expected_value[j])
+                self.moving_variance[j] = ((1 - self.momentum) * self.moving_variance[j]
+                                       + self.momentum * variance[j])
+
+                # DEBUG
+                #  self._print_op("moving mean ", j, " ", self.moving_mean[j])
+                #  self._print_op("moving variance ", j, " ", self.moving_variance[j])
+
+            # DEBUG
+            for j in range(self.num_features):
+                self._print_op("moving mean ", j, " ", self.moving_mean[j])
+                self._print_op("moving variance ", j, " ", self.moving_variance[j])
+
+            return x_norm
+
+        # inference
+        x_norm = x.copy()
+        for i in range(batch_size):
+            for j in range(self.num_features):
+                x_norm[i][j] = ((x[i][j] - self.moving_mean[j]) /
+                               self._sqrt_op(self.moving_variance[j] + self.eps))
+                x_norm[i][j] = self.beta[j] * x_norm[i][j] + self.gamma[j]
+
+        return x_norm
+
+
+    def construct(self, x):
+        # Assume x of shape (N, C, H, W)
+        batch_size = x.shape[0]
+        if self.training:
+            # calculate global batch size
+            cluster_size = self._cluster_size_op()
+            global_batch_size = batch_size * cluster_size
+
+            # mean along N
+            sum_local_batch = x.sum(axis=0)
+            sum_global_batch = self._all_reduce_op(sum_local_batch)
+            mean_global_batch = sum_global_batch / global_batch_size
+
+            # calculate expected value
+            expected_value = mean_global_batch.mean(axis=[1, 2])
+
+            # calculate variance
+            local_squared = x.copy()
+            for i in range(batch_size):
+                for j in range(self.num_features):
+                    local_squared[i, j] = self._square_op(x[i, j] - expected_value[j])
+            sum_local_var = local_squared.sum(axis=0)
+            sum_global_var = self._all_reduce_op(sum_local_var)
+            mean_variance = sum_global_var / global_batch_size
+            variance = mean_variance.mean(axis=[1, 2])
+
+            # normalise input
             x_norm = x.copy()
             for i in range(batch_size):
                 for j in range(self.num_features):
-                    x_norm[i][j] = ((x[i][j] - self.moving_mean[j]) /
-                    self._sqrt_op(self.moving_variance[j] + self.eps))
-                    x_norm[i][j] = self.beta[j] * x_norm[i][j] + self.gamma[j]
+                    zero_mean = (x[i, j] - expected_value[j])
+                    one_var = self._sqrt_op(variance[j] + self.eps)
+                    x_norm[i, j] = zero_mean / one_var
+
+            for i in range(batch_size):
+                for j in range(self.num_features):
+                    x_norm[i][j] = self.gamma[j] * x_norm[i][j] + self.beta[j]
+
+            self.moving_mean = ((1 - self.momentum) * self.moving_mean
+                               + self.momentum * expected_value)
+            self.moving_variance = ((1 - self.momentum) * self.moving_variance
+                                   + self.momentum * variance)
+
+            return x_norm
+
+        # inference
+        x_norm = x.copy()
+        for i in range(batch_size):
+            for j in range(self.num_features):
+                x_norm[i][j] = ((x[i][j] - self.moving_mean[j]) /
+                               self._sqrt_op(self.moving_variance[j] + self.eps))
+                x_norm[i][j] = self.beta[j] * x_norm[i][j] + self.gamma[j]
 
         return x_norm
 
@@ -155,7 +190,7 @@ def test_kungfu():
     global_bn_op = KungfuBatchNorm(num_features)
     global_bn_op.set_train()
 
-    x_np = (np.random.rand(4, 3, 2, 2) * 10).astype(np.float32)
+    x_np = (np.random.rand(4, 3, 12, 24) * 10).astype(np.float32)
     rank = kfops.kungfu_current_rank()
     if rank == 0:
         x_shard = x_np[:2]
@@ -163,18 +198,17 @@ def test_kungfu():
         x_shard = x_np[2:]
 
     # DEBUG
-    print("input shape")
-    print(x_shard.shape)
+    #  print("input shape")
+    #  print(x_shard.shape)
 
     x = ms.Tensor(x_shard)
     kf_out = global_bn_op(x)
 
     # DEBUG
-    print("output shape")
-    print(kf_out.asnumpy().shape)
+    #  print("output shape")
+    #  print(kf_out.asnumpy().shape)
 
     ms_bn_op = ms.nn.BatchNorm2d(num_features)
-
     ms_bn_op.set_train()
     x = ms.Tensor(x_np)
     ms_out = ms_bn_op(x)
@@ -191,47 +225,53 @@ def test_kungfu_single():
     ms.common.set_seed(42)
     np.random.seed(42)
     device = "GPU"
+    if True:
+        ms.context.set_context(mode=ms.context.GRAPH_MODE,
+                               device_target=device)
+    else:
+        ms.context.set_context(mode=ms.context.PYNATIVE_MODE,
+                               device_target=device)
     kfops.init(device)
 
-    # DEBUG
-    num_features = 2
+    num_features = 3
+    kf_bn_op = KungfuBatchNorm(num_features)
+    kf_bn_op.set_train()
+    #  kf_bn_op.set_train(False)
 
-    #  num_features = 3
-    global_bn_op = KungfuBatchNorm(num_features)
-    global_bn_op.set_train()
-
-    x_np = (np.random.rand(2, 2, 2, 2) * 10).astype(np.float32)
+    x_np = (np.random.rand(4, 3, 12, 24) * 10).astype(np.float32)
 
     # DEBUG
-    print("input shape")
-    print(x_np.shape)
-    print("input")
-    print(x_np)
+    #  print("input shape")
+    #  print(x_np.shape)
+    #  print("input")
+    #  print(x_np)
 
     x = ms.Tensor(x_np)
-    kf_out = global_bn_op(x)
+    kf_out = kf_bn_op(x)
 
     # DEBUG
-    print("output shape")
-    print(kf_out.asnumpy().shape)
-    print("output")
-    print(kf_out)
+    #  print("output shape")
+    #  print(kf_out.asnumpy().shape)
+    #  print("output")
+    #  print(kf_out)
 
     ms_bn_op = ms.nn.BatchNorm2d(num_features)
     ms_bn_op.set_train()
+    #  ms_bn_op.set_train(False)
     x = ms.Tensor(x_np)
     ms_out = ms_bn_op(x)
 
-    print("ms output")
-    print(ms_out)
+    # DEBUG
+    #  print("ms output")
+    #  print(ms_out)
 
     diff = kf_out.asnumpy() - ms_out.asnumpy()
     diff = np.abs(diff)
     print("max diff {}".format(diff.max()))
 
     # COMPARE
-    if True:
-        kf_params = global_bn_op.get_parameters()
+    if False:
+        kf_params = kf_bn_op.get_parameters()
         ms_params = ms_bn_op.get_parameters()
         for ms_param, kf_param in zip(ms_params, kf_params):
             a = ms_param.asnumpy()
@@ -240,16 +280,26 @@ def test_kungfu_single():
                 print("{} Equal".format(ms_param.name))
             else:
                 print("{} Unequal".format(ms_param.name))
-                max_diff = np.max(np.abs(a - b)) 
+                print("val ms {}".format(a))
+                print("val kf {}".format(b))
+                max_diff = np.max(np.abs(a - b))
                 print("max diff {}".format(max_diff))
-
     if False:
         for attr in dir(ms_bn_op):
-            if hasattr(ms_bn_op, attr) and hasattr(global_bn_op, attr):
-                if getattr(ms_bn_op, attr) != getattr(global_bn_op, attr):
+            if hasattr(ms_bn_op, attr) and hasattr(kf_bn_op, attr):
+                if getattr(ms_bn_op, attr) != getattr(kf_bn_op, attr):
                     print("{} Unequal".format(attr))
                 else:
                     print("{} Equal".format(attr))
+    if False:
+        if kf_bn_op.momentum == ms_bn_op.momentum:
+            print("Momentum Equal")
+    if True:
+        print("kf moving mean {}".format(kf_bn_op.moving_mean.asnumpy()))
+        print("ms moving mean {}".format(ms_bn_op.moving_mean.asnumpy()))
+        print("kf moving variance {}".format(kf_bn_op.moving_variance.asnumpy()))
+        print("ms moving variance {}".format(ms_bn_op.moving_variance.asnumpy()))
+
 
     kfops.finalize(device)
 

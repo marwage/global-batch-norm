@@ -1,8 +1,8 @@
 #!/bin/bash
 
-RANK_SIZE=1
+RANK_SIZE=2
 
-export CUDA_VISIBLE_DEVICES=2,3
+export CUDA_VISIBLE_DEVICES=0,1
 
 . /home/marcel/Elasticity/Repository/kungfu-mindspore/ld_library_path.sh
 export LD_LIBRARY_PATH=$(ld_library_path /home/marcel/Elasticity/Repository/kungfu-mindspore/mindspore)
@@ -11,4 +11,4 @@ export LD_LIBRARY_PATH=$(ld_library_path /home/marcel/Elasticity/Repository/kung
     -np $RANK_SIZE \
     -logfile kungfu-run.log \
     -logdir ./log \
-    python kf_batch_norm.py
+    python kf_cluster_size_op.py
