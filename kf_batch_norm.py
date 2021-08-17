@@ -57,7 +57,6 @@ class KungfuBatchNorm(ms.nn.Cell):
             # calculate global batch size
             cluster_size = self._cluster_size_op()
             global_batch_size = batch_size * cluster_size
-            y = 1 / global_batch_size # DEBUG
 
             # mean along N
             sum_local_batch = x.sum(axis=0)
@@ -110,49 +109,9 @@ class KungfuBatchNorm(ms.nn.Cell):
 def test_kungfu():
     ms.common.set_seed(42)
     np.random.seed(42)
+    training = True
     device = "GPU"
-    kfops.init(device)
-
-    num_features = 3
-    global_bn_op = KungfuBatchNorm(num_features)
-    global_bn_op.set_train()
-
-    x_np = (np.random.rand(4, 3, 12, 24) * 10).astype(np.float32)
-    rank = kfops.kungfu_current_rank()
-    if rank == 0:
-        x_shard = x_np[:2]
-    else:
-        x_shard = x_np[2:]
-
-    # DEBUG
-    #  print("input shape")
-    #  print(x_shard.shape)
-
-    x = ms.Tensor(x_shard)
-    kf_out = global_bn_op(x)
-
-    # DEBUG
-    #  print("output shape")
-    #  print(kf_out.asnumpy().shape)
-
-    ms_bn_op = ms.nn.BatchNorm2d(num_features)
-    ms_bn_op.set_train()
-    x = ms.Tensor(x_np)
-    ms_out = ms_bn_op(x)
-
-    if rank == 0:
-        diff = kf_out - ms_out[:2]
-    else:
-        diff = kf_out - ms_out[2:]
-    print("max diff {}".format(diff.max()))
-
-    kfops.finalize(device)
-
-def test_kungfu_single():
-    ms.common.set_seed(42)
-    np.random.seed(42)
-    device = "GPU"
-    if True:
+    if False:
         ms.context.set_context(mode=ms.context.GRAPH_MODE,
                                device_target=device)
     else:
@@ -162,39 +121,47 @@ def test_kungfu_single():
 
     num_features = 3
     kf_bn_op = KungfuBatchNorm(num_features)
-    kf_bn_op.set_train()
-    #  kf_bn_op.set_train(False)
+    kf_bn_op.set_train(training)
 
     x_np = (np.random.rand(4, 3, 12, 24) * 10).astype(np.float32)
 
-    # DEBUG
-    #  print("input shape")
-    #  print(x_np.shape)
-    #  print("input")
-    #  print(x_np)
+    cluster_size = kfops.kungfu_current_cluster_size()
+    if cluster_size > 1:
+        # only works for cluster_size == 2
+        rank = kfops.kungfu_current_rank()
+        if rank == 0:
+            x_np = x_np[:2]
+        else:
+            x_np = x_np[2:]
+
+    if False:
+        print("input shape")
+        print(x_np.shape)
+        print("input")
+        print(x_np)
 
     x = ms.Tensor(x_np)
     kf_out = kf_bn_op(x)
 
-    # DEBUG
-    #  print("output shape")
-    #  print(kf_out.asnumpy().shape)
-    #  print("output")
-    #  print(kf_out)
+    if False:
+        print("output shape")
+        print(kf_out.asnumpy().shape)
+        print("output")
+        print(kf_out)
 
     ms_bn_op = ms.nn.BatchNorm2d(num_features)
-    ms_bn_op.set_train()
-    #  ms_bn_op.set_train(False)
+    ms_bn_op.set_train(training)
     x = ms.Tensor(x_np)
     ms_out = ms_bn_op(x)
 
-    # DEBUG
-    #  print("ms output")
-    #  print(ms_out)
+    if False:
+        print("ms output")
+        print(ms_out)
 
-    diff = kf_out.asnumpy() - ms_out.asnumpy()
-    diff = np.abs(diff)
-    print("max diff {}".format(diff.max()))
+    if True:
+        diff = kf_out.asnumpy() - ms_out.asnumpy()
+        diff = np.abs(diff)
+        print("max diff {}".format(diff.max()))
 
     # COMPARE
     if False:
@@ -231,8 +198,7 @@ def test_kungfu_single():
     kfops.finalize(device)
 
 def main():
-    #  test_kungfu()
-    test_kungfu_single()
+    test_kungfu()
 
 
 if __name__ == "__main__":
