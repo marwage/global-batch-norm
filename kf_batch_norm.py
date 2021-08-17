@@ -50,80 +50,6 @@ class KungfuBatchNorm(ms.nn.Cell):
         # DEBUG
         self._print_op = ms.ops.Print()
 
-    def _construct(self, x):
-        # Assume x of shape (N, C, H, W)
-        batch_size = x.shape[0]
-        if self.training:
-            # calculate global batch size
-            cluster_size = self._cluster_size_op()
-            global_batch_size = batch_size * cluster_size
-
-            # mean along N
-            sum_local_batch = x.sum(axis=0)
-            sum_global_batch = self._all_reduce_op(sum_local_batch)
-            mean_global_batch = sum_global_batch / global_batch_size
-
-            # calculate expected value
-            expected_value = self.moving_mean.copy()
-            for i in range(self.num_features):
-                expected_value[i] = mean_global_batch[i].mean()
-
-            # calculate variance
-            variance = self.moving_variance.copy()
-            local_squared = x.copy()
-            for i in range(batch_size):
-                for j in range(self.num_features):
-                    local_squared[i, j] = self._square_op(x[i, j] - expected_value[j])
-            sum_local_var = local_squared.sum(axis=0)
-            sum_global_var = self._all_reduce_op(sum_local_var)
-            mean_variance = sum_global_var / global_batch_size
-            for j in range(self.num_features):
-                variance[j] = mean_variance[j].mean()
-
-            # normalise input
-            x_norm = x.copy()
-            for i in range(batch_size):
-                for j in range(self.num_features):
-                    zero_mean = (x[i, j] - expected_value[j])
-                    one_var = self._sqrt_op(variance[j] + self.eps)
-                    x_norm[i, j] = zero_mean / one_var
-
-            for i in range(batch_size):
-                for j in range(self.num_features):
-                    x_norm[i][j] = self.gamma[j] * x_norm[i][j] + self.beta[j]
-
-            for j in range(self.num_features):
-                # DEBUG
-                #  self._print_op("mean ", j, " ", expected_value[j])
-                #  self._print_op("variance ", j, " ", variance[j])
-
-                self.moving_mean[j] = ((1 - self.momentum) * self.moving_mean[j]
-                                   + self.momentum * expected_value[j])
-                self.moving_variance[j] = ((1 - self.momentum) * self.moving_variance[j]
-                                       + self.momentum * variance[j])
-
-                # DEBUG
-                #  self._print_op("moving mean ", j, " ", self.moving_mean[j])
-                #  self._print_op("moving variance ", j, " ", self.moving_variance[j])
-
-            # DEBUG
-            for j in range(self.num_features):
-                self._print_op("moving mean ", j, " ", self.moving_mean[j])
-                self._print_op("moving variance ", j, " ", self.moving_variance[j])
-
-            return x_norm
-
-        # inference
-        x_norm = x.copy()
-        for i in range(batch_size):
-            for j in range(self.num_features):
-                x_norm[i][j] = ((x[i][j] - self.moving_mean[j]) /
-                               self._sqrt_op(self.moving_variance[j] + self.eps))
-                x_norm[i][j] = self.beta[j] * x_norm[i][j] + self.gamma[j]
-
-        return x_norm
-
-
     def construct(self, x):
         # Assume x of shape (N, C, H, W)
         batch_size = x.shape[0]
@@ -131,6 +57,7 @@ class KungfuBatchNorm(ms.nn.Cell):
             # calculate global batch size
             cluster_size = self._cluster_size_op()
             global_batch_size = batch_size * cluster_size
+            y = 1 / global_batch_size # DEBUG
 
             # mean along N
             sum_local_batch = x.sum(axis=0)
