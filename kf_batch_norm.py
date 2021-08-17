@@ -42,10 +42,14 @@ class KungfuBatchNorm(ms.nn.Cell):
         self.beta = ms.Parameter(initializer(
             beta_init, num_features), name="beta", requires_grad=affine)
 
-        self._cluster_size_op = kfops.KungFuClusterSize()
+        #  self._cluster_size_op = kfops.KungFuClusterSize()
         self._all_reduce_op = kfops.KungFuAllReduce()
         self._square_op = ms.ops.Square()
         self._sqrt_op = ms.ops.Sqrt()
+
+        # HACK
+        self._cluster_size_op = kfops.KungFuClusterSizeInput()
+        self._cluster_size_input = ms.Tensor(np.ones((1,), dtype=np.float32))
 
         # DEBUG
         self._print_op = ms.ops.Print()
@@ -55,7 +59,9 @@ class KungfuBatchNorm(ms.nn.Cell):
         batch_size = x.shape[0]
         if self.training:
             # calculate global batch size
-            cluster_size = self._cluster_size_op()
+            #  cluster_size = self._cluster_size_op()
+            cluster_size = self._cluster_size_op(self._cluster_size_input) # HACK
+            self._print_op("cluster size ", cluster_size)
             global_batch_size = batch_size * cluster_size
 
             # mean along N
@@ -111,7 +117,7 @@ def test_kungfu():
     np.random.seed(42)
     training = True
     device = "GPU"
-    if False:
+    if True:
         ms.context.set_context(mode=ms.context.GRAPH_MODE,
                                device_target=device)
     else:
