@@ -49,7 +49,7 @@ class KungfuBatchNorm(ms.nn.Cell):
 
         # HACK
         self._cluster_size_op = kfops.KungFuClusterSizeInput()
-        self._cluster_size_input = ms.Tensor(np.ones((1,), dtype=np.float32))
+        self._cluster_size_input = ms.Tensor(np.ones((1,), dtype=np.int32))
 
         # DEBUG
         self._print_op = ms.ops.Print()
@@ -61,7 +61,6 @@ class KungfuBatchNorm(ms.nn.Cell):
             # calculate global batch size
             #  cluster_size = self._cluster_size_op()
             cluster_size = self._cluster_size_op(self._cluster_size_input) # HACK
-            self._print_op("cluster size ", cluster_size)
             global_batch_size = batch_size * cluster_size
 
             # mean along N
@@ -88,11 +87,8 @@ class KungfuBatchNorm(ms.nn.Cell):
                 for j in range(self.num_features):
                     zero_mean = (x[i, j] - expected_value[j])
                     one_var = self._sqrt_op(variance[j] + self.eps)
-                    x_norm[i, j] = zero_mean / one_var
-
-            for i in range(batch_size):
-                for j in range(self.num_features):
-                    x_norm[i][j] = self.gamma[j] * x_norm[i][j] + self.beta[j]
+                    norm = zero_mean / one_var
+                    x_norm[i, j] = self.gamma[j] * norm + self.beta[j]
 
             self.moving_mean = ((1 - self.momentum) * self.moving_mean
                                + self.momentum * expected_value)
@@ -105,9 +101,10 @@ class KungfuBatchNorm(ms.nn.Cell):
         x_norm = x.copy()
         for i in range(batch_size):
             for j in range(self.num_features):
-                x_norm[i][j] = ((x[i][j] - self.moving_mean[j]) /
-                               self._sqrt_op(self.moving_variance[j] + self.eps))
-                x_norm[i][j] = self.beta[j] * x_norm[i][j] + self.gamma[j]
+                zero_mean = (x[i, j] - self.moving_mean[j])
+                one_var = self._sqrt_op(self.moving_variance[j] + self.eps)
+                norm = zero_mean / one_var
+                x_norm[i, j] = self.gamma[j] * norm + self.beta[j]
 
         return x_norm
 
